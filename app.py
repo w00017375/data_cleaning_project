@@ -830,6 +830,118 @@ def df_to_csv_bytes(df: pd.DataFrame) -> bytes:
 
 
 # ---------------------------------------------------------------------------
+# Recipe import validation
+# ---------------------------------------------------------------------------
+SUPPORTED_RECIPE_OPERATIONS: set[str] = {
+    "filter",
+    "missing_values",
+    "replace_values",
+    "remove_duplicates",
+    "clean_numeric_strings",
+    "trim_whitespace",
+    "outlier_trim",
+    "outlier_winsorize",
+    "scale",
+    "numeric_format",
+    "date_format",
+    "convert_dtype",
+    "redetect_dtypes",
+    "case_change",
+    "split_column",
+    "rename_columns",
+    "delete_columns",
+    "drop_sparse_columns",
+    "group_rare_categories",
+    "one_hot_encode",
+    "bin_numeric",
+    "new_column",
+}
+
+
+def validate_recipe_payload(payload: Any) -> tuple[list[dict], list[str], list[str]]:
+    """Validate imported recipe JSON before preview/replay.
+
+    Returns (steps, errors, warnings). Errors block replay because the script
+    cannot read/apply the recipe safely. Warnings do not block replay, but tell
+    the user which readability metadata is missing.
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    steps: list[dict] = []
+
+    if not isinstance(payload, dict):
+        return [], [
+            "Top-level JSON must be an object containing a `steps` or `recipe` list."
+        ], []
+
+    if "steps" in payload:
+        raw_steps = payload.get("steps")
+    elif "recipe" in payload:
+        raw_steps = payload.get("recipe")
+    else:
+        return [], [
+            "Missing top-level key: expected `steps` or `recipe`."
+        ], []
+
+    if not isinstance(raw_steps, list):
+        return [], [
+            "`steps` / `recipe` must be a list of transformation step objects."
+        ], []
+    if not raw_steps:
+        return [], ["Recipe contains no steps to replay."], []
+
+    for i, step in enumerate(raw_steps, 1):
+        if not isinstance(step, dict):
+            errors.append(f"Step #{i}: each recipe step must be a JSON object.")
+            continue
+
+        operation = step.get("operation") or step.get("action")
+        if not isinstance(operation, str) or not operation.strip():
+            errors.append(
+                f"Step #{i}: missing readable `operation` string "
+                "(legacy key `action` is also accepted)."
+            )
+        elif operation not in SUPPORTED_RECIPE_OPERATIONS:
+            errors.append(
+                f"Step #{i}: unsupported operation `{operation}`. "
+                "This script cannot replay that action."
+            )
+
+        has_params_key = "parameters" in step or "params" in step
+        params = step.get("parameters") if "parameters" in step else step.get("params")
+        if not has_params_key:
+            errors.append(
+                f"Step #{i}: missing `parameters` object "
+                "(legacy key `params` is also accepted)."
+            )
+        elif not isinstance(params, dict):
+            errors.append(f"Step #{i}: `parameters` / `params` must be a JSON object.")
+
+        affected = step.get("affected_columns", [])
+        if "affected_columns" not in step:
+            warnings.append(
+                f"Step #{i}: missing `affected_columns`; preview will show `—`."
+            )
+        elif not isinstance(affected, list) or not all(isinstance(c, str) for c in affected):
+            errors.append(
+                f"Step #{i}: `affected_columns` must be a list of column-name strings."
+            )
+
+        timestamp = step.get("timestamp")
+        if "timestamp" not in step:
+            warnings.append(
+                f"Step #{i}: missing `timestamp`; preview will show `—`."
+            )
+        elif not isinstance(timestamp, str):
+            errors.append(f"Step #{i}: `timestamp` must be a string.")
+
+    if not errors:
+        steps = raw_steps
+    return steps, errors, warnings
+
+
+
+# ---------------------------------------------------------------------------
 # Cached versions of the expensive computations
 # ---------------------------------------------------------------------------
 # All of these use the fingerprint pattern: pass a cheap tuple as the cache
@@ -2749,6 +2861,11 @@ with tab1:
                     # Only drop columns that still exist (guard against
                     # stale selections after other edits).
                     to_drop = [c for c in pending if c in df.columns]
+
+                    if len(to_drop) >= df.shape[1]:
+                        st.error("You cannot delete all columns. Keep at least one column.")
+                        st.stop()
+
                     df = df.drop(columns=to_drop)
                     st.session_state.df = df
                     log_step(
@@ -2894,19 +3011,41 @@ with tab2:
                     key=f"fop_{i}",
                 )
                 if op == "between":
-                    lo = float(np.nanmin(series))
-                    hi = float(np.nanmax(series))
-                    val = cols[2].slider(
-                        "Range", lo, hi, (lo, hi), key=f"fval_{i}"
-                    )
+                    s_nonnull = series.dropna()
+                    if s_nonnull.empty:
+                        # Column is entirely null — between makes no sense; fall
+                        # back to a manual numeric input so the UI keeps working.
+                        cols[2].caption(
+                            f"`{col}` has no non-null values — pick a number "
+                            "to compare against."
+                        )
+                        val = cols[2].number_input("Value", key=f"fval_{i}")
+                        mask = series == val
+                    else:
+                        lo = float(np.nanmin(series))
+                        hi = float(np.nanmax(series))
+                        if lo == hi:
+                            # Constant column — st.slider would raise because
+                            # min and max are equal. Switch to an exact-match
+                            # comparison against that single value.
+                            cols[2].caption(
+                                f"`{col}` is constant at **{lo:g}** — "
+                                "filter keeps rows equal to this value."
+                            )
+                            val = [lo, hi]  # tuple-like for series.between()
+                            mask = series == lo
+                        else:
+                            val = cols[2].slider(
+                                "Range", lo, hi, (lo, hi), key=f"fval_{i}"
+                            )
+                            mask = series.between(*val)
                 else:
                     val = cols[2].number_input("Value", key=f"fval_{i}")
-                mask = {
-                    "==": series == val, "!=": series != val,
-                    ">": series > val, ">=": series >= val,
-                    "<": series < val, "<=": series <= val,
-                    "between": series.between(*val) if op == "between" else None,
-                }[op]
+                    mask = {
+                        "==": series == val, "!=": series != val,
+                        ">": series > val, ">=": series >= val,
+                        "<": series < val, "<=": series <= val,
+                    }[op]
             else:
                 op = cols[1].selectbox(
                     "Op", ["is in", "not in", "contains"], key=f"fop_{i}",
@@ -4578,6 +4717,191 @@ with tab2:
         # We evaluate piece-by-piece into Series/scalars then combine using
         # Python `eval` on a token list. This handles aggregates that produce
         # column-wide scalars (broadcast to every row) cleanly.
+        # --------------------------------------------------------------
+        # Formula validators — run BEFORE evaluation to catch problems
+        # the user can fix, and to auto-repair the small ones (unclosed
+        # parentheses). Conflicts here block the "Create column" button
+        # entirely; the auto-fix and the division-by-zero check are
+        # warnings that don't block.
+        # --------------------------------------------------------------
+        def validate_formula_parts(parts: list[dict]) -> list[str]:
+            """
+            Scan the part sequence for arithmetic-grammar conflicts.
+
+            Returns a list of human-readable problem messages. An empty
+            list means the sequence is well-formed.
+
+            Detects:
+              - adjacent operators like  +*  /-  -/  (e.g. "2 + * 2")
+              - operator at the very start (other than unary "-")
+              - operator at the very end (any operator including minus)
+              - "(" at the end with nothing after it
+              - ")" with nothing before it
+              - empty formula
+            """
+            problems: list[str] = []
+
+            # Build a simplified token-kind sequence:
+            #   "v"      — a value-producing token (col / num / fn)
+            #   "+","-","*","/","**" — binary operators
+            #   "(", ")" — parentheses
+            kinds: list[str] = []
+            for p in parts:
+                k = p["kind"]
+                if k in ("col", "num", "fn"):
+                    kinds.append("v")
+                elif k == "op":
+                    kinds.append(p["value"])
+                # any unknown kind: ignore for grammar purposes
+
+            if not kinds:
+                problems.append("The formula is empty.")
+                return problems
+
+            binary_ops = {"+", "-", "*", "/", "**"}
+
+            # Leading token: only a value or "(" or unary "-" makes sense.
+            first = kinds[0]
+            if first in binary_ops and first != "-":
+                problems.append(
+                    f"The formula starts with `{first}`. Operators must sit "
+                    "between two values."
+                )
+
+            # Trailing token: must be a value or ")".
+            last = kinds[-1]
+            if last in binary_ops:
+                problems.append(
+                    f"The formula ends with `{last}`. Add a value after it "
+                    "(a column, a number, or a function)."
+                )
+            elif last == "(":
+                problems.append(
+                    "The formula ends with `(` and nothing inside it."
+                )
+
+            # Adjacency rules
+            for i in range(1, len(kinds)):
+                a, b = kinds[i - 1], kinds[i]
+
+                # Two binary operators in a row, e.g. "2 + * 2"
+                # Exception: a unary minus after another operator or `(`,
+                # i.e. "2 * -3", "(-x)" — accept those.
+                if a in binary_ops and b in binary_ops:
+                    if b == "-" and a in binary_ops:
+                        continue  # unary minus
+                    problems.append(
+                        f"Operators `{a}` and `{b}` appear back-to-back. "
+                        "Remove one or put a value between them."
+                    )
+
+                # Two values in a row, e.g. "col col" or "5 col"
+                if a == "v" and b == "v":
+                    problems.append(
+                        "Two values appear back-to-back with no operator. "
+                        "Insert `+`, `-`, `*`, or `/` between them."
+                    )
+
+                # ")" immediately before "(" or a value, e.g. ")(" or ")5"
+                if a == ")" and b in ("(", "v"):
+                    problems.append(
+                        "Closed parenthesis is followed by another value "
+                        "without an operator in between."
+                    )
+
+                # Operator immediately before ")", e.g. "(2 +)"
+                if a in binary_ops and b == ")":
+                    problems.append(
+                        f"`{a}` appears right before `)` — the parenthesis "
+                        "is closing on an unfinished sub-expression."
+                    )
+
+                # "(" immediately followed by an operator (other than unary -)
+                if a == "(" and b in binary_ops and b != "-":
+                    problems.append(
+                        f"`(` is followed by `{b}` with no value first."
+                    )
+
+            return problems
+
+
+        def auto_close_parens(parts: list[dict]) -> tuple[list[dict], int]:
+            """
+            If the parts list has more "(" than ")", append enough ")" parts
+            at the end to balance the count. Returns (new_parts, n_added).
+            We never delete a stray ")", since that's a real conflict — the
+            grammar validator above is responsible for flagging it.
+            """
+            n_open = sum(1 for p in parts
+                         if p["kind"] == "op" and p["value"] == "(")
+            n_close = sum(1 for p in parts
+                          if p["kind"] == "op" and p["value"] == ")")
+            missing = n_open - n_close
+            if missing <= 0:
+                return parts, 0
+            patched = list(parts) + [{"kind": "op", "value": ")"}] * missing
+            return patched, missing
+
+
+        def check_division_by_zero(parts: list[dict],
+                                   frame: pd.DataFrame) -> str | None:
+            """
+            Look at each `/` operator in the part sequence and inspect the
+            token that immediately follows. If it's a literal number 0, that
+            is a guaranteed division by zero — refuse. If it's a column or an
+            aggregate function and the resolved value contains any zero on
+            the sample frame, return a *warning* (the user can still proceed;
+            pandas will produce inf / NaN there, not raise).
+
+            Returns:
+              - a "blocking" message (str) if literal 0 is the divisor
+              - a "warning" message (str) if a column/scalar divisor contains zero
+              - None if no division-by-zero risk found
+            """
+            warnings: list[str] = []
+            for i, p in enumerate(parts):
+                if not (p["kind"] == "op" and p["value"] == "/"):
+                    continue
+                if i + 1 >= len(parts):
+                    continue  # validator above catches trailing-operator case
+                nxt = parts[i + 1]
+
+                # Literal 0  →  hard block
+                if nxt["kind"] == "num" and float(nxt["value"]) == 0:
+                    return "Division by literal 0 — please replace the divisor."
+
+                # Column divisor — check actual values on the sample
+                if nxt["kind"] == "col":
+                    col = nxt["name"]
+                    if col in frame.columns:
+                        try:
+                            series = pd.to_numeric(frame[col], errors="coerce")
+                            if (series == 0).any():
+                                warnings.append(
+                                    f"`{col}` contains 0 — rows where it's 0 "
+                                    "will produce inf or NaN."
+                                )
+                        except Exception:
+                            pass
+
+                # Aggregate divisor — compute the scalar and check
+                if nxt["kind"] == "fn" and nxt.get("agg_mode") == "aggregate" \
+                        and not nxt.get("group_by"):
+                    col = nxt.get("col")
+                    if col and col in frame.columns:
+                        try:
+                            scalar = frame[col].agg(nxt["name"])
+                            if scalar == 0:
+                                return (f"Divisor `{nxt['name']}({col})` "
+                                        "evaluates to 0 — division would fail.")
+                        except Exception:
+                            pass
+
+            if warnings:
+                return "Possible division by zero: " + " ".join(warnings)
+            return None
+
+
         def evaluate_parts(parts: list[dict], frame: pd.DataFrame) -> pd.Series:
             """
             Compute each token to a value (Series or scalar), then assemble
@@ -4656,7 +4980,21 @@ with tab2:
         st.markdown("**Preview**")
 
         if parts:
-            human = assemble_human(parts)
+            # --- 1. Grammar check (blocks the build entirely) ---
+            conflicts = validate_formula_parts(parts)
+
+            # --- 2. Auto-close unclosed parentheses ---
+            # If there's a structural conflict already, we still try to close
+            # parens so the human-readable expression in the preview doesn't
+            # look misleading — but we leave conflicts in the message list.
+            effective_parts, n_added = auto_close_parens(parts)
+            if n_added:
+                st.info(
+                    f"ℹ️ Auto-closed {n_added} unclosed parenthesis"
+                    f"{'es' if n_added > 1 else ''} at the end of the formula."
+                )
+
+            human = assemble_human(effective_parts)
             st.markdown(
                 f"<div style='font-family:monospace;background:#0f172a;"
                 f"color:#f1f5f9;padding:10px 14px;border-radius:6px;'>"
@@ -4664,43 +5002,71 @@ with tab2:
                 unsafe_allow_html=True,
             )
 
-            preview_ok = False
-            preview_err = None
-            try:
-                sample = df.head(10)
-                preview = evaluate_parts(parts, sample)
-                preview_df = pd.DataFrame({new_name or "result": preview})
-                st.caption("First 10 rows:")
-                st.dataframe(preview_df, use_container_width=True)
-                preview_ok = True
-            except SyntaxError:
-                preview_err = ("The pieces don't form a valid expression. "
-                               "Check parentheses and that operators sit "
-                               "between values, not at the start or end.")
-            except KeyError as e:
-                preview_err = f"Column not found: {e}. Maybe it was renamed or removed?"
-            except ZeroDivisionError:
-                preview_err = "Division by zero in the formula."
-            except TypeError as e:
-                preview_err = (f"Wrong type for one of the pieces: {e}. "
-                               "Most functions need numeric columns.")
-            except Exception as e:
-                preview_err = f"Couldn't evaluate the formula: {e}"
+            # If there are grammar conflicts, refuse to attempt evaluation.
+            if conflicts:
+                for msg in conflicts:
+                    st.error(f"⛔ {msg}")
+                st.caption(
+                    "Fix the issues above to enable the preview and the "
+                    "**Create column** button."
+                )
+                preview_ok = False
+            else:
+                # --- 3. Division-by-zero check — may block, may warn ---
+                dz_msg = check_division_by_zero(effective_parts, df.head(50))
+                dz_blocks = bool(dz_msg) and (
+                    "literal 0" in dz_msg or "evaluates to 0" in dz_msg
+                )
+                if dz_msg:
+                    if dz_blocks:
+                        st.error(f"⛔ {dz_msg}")
+                    else:
+                        st.warning(f"⚠️ {dz_msg}")
 
-            if preview_err:
-                st.warning(f"⚠️ {preview_err}")
+                # --- 4. Try evaluation on a sample ---
+                preview_ok = False
+                preview_err = None
+                if dz_blocks:
+                    preview_ok = False
+                else:
+                    try:
+                        sample = df.head(10)
+                        preview = evaluate_parts(effective_parts, sample)
+                        preview_df = pd.DataFrame({new_name or "result": preview})
+                        st.caption("First 10 rows:")
+                        st.dataframe(preview_df, use_container_width=True)
+                        preview_ok = True
+                    except SyntaxError:
+                        preview_err = (
+                            "The pieces don't form a valid expression. "
+                            "Check parentheses and that operators sit "
+                            "between values, not at the start or end."
+                        )
+                    except KeyError as e:
+                        preview_err = (f"Column not found: {e}. "
+                                       "Maybe it was renamed or removed?")
+                    except ZeroDivisionError:
+                        preview_err = "Division by zero in the formula."
+                    except TypeError as e:
+                        preview_err = (f"Wrong type for one of the pieces: {e}. "
+                                       "Most functions need numeric columns.")
+                    except Exception as e:
+                        preview_err = f"Couldn't evaluate the formula: {e}"
+
+                if preview_err:
+                    st.warning(f"⚠️ {preview_err}")
 
             if st.button("Create column", type="primary",
                          disabled=(not preview_ok or not new_name)):
                 try:
-                    result = evaluate_parts(parts, df)
+                    result = evaluate_parts(effective_parts, df)
                     before = len(df)
                     df[new_name] = result
                     st.session_state.df = df
                     log_step(
                         "new_column",
                         {"name": new_name, "mode": "formula",
-                         "parts": parts, "expression": human},
+                         "parts": effective_parts, "expression": human},
                         before, len(df),
                     )
                     st.session_state.formula_parts = []
@@ -5128,22 +5494,42 @@ with tab2:
 
     if up_recipe is not None:
         try:
-            payload = json.loads(up_recipe.read().decode("utf-8"))
-            steps_in = payload.get("steps") or payload.get("recipe") or []
-            if not isinstance(steps_in, list) or not steps_in:
-                st.warning("This file doesn't look like a valid recipe.")
+            payload = json.loads(up_recipe.getvalue().decode("utf-8"))
+            steps_in, validation_errors, validation_warnings = validate_recipe_payload(payload)
+
+            if validation_errors:
+                st.error(
+                    "This recipe file cannot be replayed because it does not "
+                    "follow the script-readable recipe structure."
+                )
+                st.dataframe(
+                    pd.DataFrame({"Problem reason": validation_errors}),
+                    use_container_width=True,
+                    hide_index=True,
+                )
             else:
+                if validation_warnings:
+                    st.warning(
+                        "Recipe is readable, but some preview metadata is missing:\n\n- "
+                        + "\n- ".join(validation_warnings[:10])
+                        + ("\n- …" if len(validation_warnings) > 10 else "")
+                    )
+
+                source_name = payload.get("source_file") or payload.get("file") or "—"
                 st.success(
-                    f"Found a recipe with **{len(steps_in)}** step(s) "
-                    f"from `{payload.get('source_file', '—')}`."
+                    f"Found a valid recipe with **{len(steps_in)}** step(s) "
+                    f"from `{source_name}`."
                 )
                 # Preview the steps
                 preview_rows = []
                 for i, step in enumerate(steps_in, 1):
+                    affected_columns = step.get("affected_columns", [])
+                    if not isinstance(affected_columns, list):
+                        affected_columns = []
                     preview_rows.append({
                         "#": i,
                         "operation": step.get("operation") or step.get("action", "?"),
-                        "affected_columns": ", ".join(step.get("affected_columns", [])) or "—",
+                        "affected_columns": ", ".join(affected_columns) or "—",
                         "timestamp": step.get("timestamp", "—"),
                     })
                 st.dataframe(pd.DataFrame(preview_rows),
@@ -5182,6 +5568,15 @@ with tab2:
                             + "\n- ".join(errors[:10])
                         )
                     st.rerun()
+        except json.JSONDecodeError as e:
+            st.error(
+                "Could not read the recipe file: invalid JSON syntax. "
+                f"Reason: {e.msg} at line {e.lineno}, column {e.colno}."
+            )
+        except UnicodeDecodeError:
+            st.error(
+                "Could not read the recipe file: file must be UTF-8 encoded JSON."
+            )
         except Exception as e:
             st.error(f"Could not read the recipe file: {e}")
 
@@ -5763,10 +6158,30 @@ with tab3:
                                   [">", "<", "between", "==", "!=", ">=", "<="],
                                   key=f"cfg_fop_{i}")
                 if op == "between":
-                    lo = float(np.nanmin(s)); hi = float(np.nanmax(s))
-                    rng = st.slider("Range", lo, hi, (lo, hi), key=f"cfg_fval_{i}")
-                    filters.append({"kind": "numeric", "col": fcol, "op": op,
-                                    "val": [rng[0], rng[1]]})
+                    s_nonnull = s.dropna()
+                    if s_nonnull.empty:
+                        st.caption(
+                            f"`{fcol}` has no non-null values — pick a number."
+                        )
+                        v = st.number_input("Value", key=f"cfg_fval_{i}")
+                        filters.append({"kind": "numeric", "col": fcol,
+                                        "op": "==", "val": v})
+                    else:
+                        lo = float(np.nanmin(s)); hi = float(np.nanmax(s))
+                        if lo == hi:
+                            st.caption(
+                                f"`{fcol}` is constant at **{lo:g}** — "
+                                "filter keeps rows equal to this value."
+                            )
+                            filters.append({"kind": "numeric", "col": fcol,
+                                            "op": "between",
+                                            "val": [lo, hi]})
+                        else:
+                            rng = st.slider("Range", lo, hi, (lo, hi),
+                                            key=f"cfg_fval_{i}")
+                            filters.append({"kind": "numeric", "col": fcol,
+                                            "op": op,
+                                            "val": [rng[0], rng[1]]})
                 else:
                     v = st.number_input("Value", key=f"cfg_fval_{i}")
                     filters.append({"kind": "numeric", "col": fcol, "op": op, "val": v})
@@ -5991,13 +6406,43 @@ with tab3:
                                 key=f"ctrl_fop_{cid}_{j}",
                             )
                             if op == "between":
-                                lo = float(np.nanmin(s)); hi = float(np.nanmax(s))
-                                pv = prev.get("val") or [lo, hi]
-                                rng = st.slider("Range", lo, hi,
-                                                (float(pv[0]), float(pv[1])),
-                                                key=f"ctrl_fval_{cid}_{j}")
-                                new_draft.append({"kind": "numeric", "col": fcol,
-                                                  "op": op, "val": [rng[0], rng[1]]})
+                                s_nonnull = s.dropna()
+                                if s_nonnull.empty:
+                                    st.caption(
+                                        f"`{fcol}` has no non-null values — "
+                                        "pick a number."
+                                    )
+                                    v = st.number_input(
+                                        "Value",
+                                        value=float(prev.get("val", 0.0))
+                                              if isinstance(prev.get("val"), (int, float)) else 0.0,
+                                        key=f"ctrl_fval_{cid}_{j}",
+                                    )
+                                    new_draft.append({"kind": "numeric",
+                                                      "col": fcol, "op": "==",
+                                                      "val": v})
+                                else:
+                                    lo = float(np.nanmin(s)); hi = float(np.nanmax(s))
+                                    if lo == hi:
+                                        st.caption(
+                                            f"`{fcol}` is constant at "
+                                            f"**{lo:g}** — filter keeps rows "
+                                            "equal to this value."
+                                        )
+                                        new_draft.append({"kind": "numeric",
+                                                          "col": fcol,
+                                                          "op": "between",
+                                                          "val": [lo, hi]})
+                                    else:
+                                        pv = prev.get("val") or [lo, hi]
+                                        rng = st.slider(
+                                            "Range", lo, hi,
+                                            (float(pv[0]), float(pv[1])),
+                                            key=f"ctrl_fval_{cid}_{j}",
+                                        )
+                                        new_draft.append({"kind": "numeric",
+                                                          "col": fcol, "op": op,
+                                                          "val": [rng[0], rng[1]]})
                             elif op in ("==", "!="):
                                 # Equal/not-equal also gets a value picker
                                 # built from the actual column values.
