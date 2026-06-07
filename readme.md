@@ -1,5 +1,7 @@
 # Data Analysis Studio refactor
 
+streamlit link: https://datacleaningproject-pbebitrdhqjggrngwiptxh.streamlit.app/
+
 This folder contains the same Streamlit application split into modules.
 
 - `app.py` — Streamlit entry point. It configures the page and calls each tab renderer.
@@ -40,4 +42,4 @@ Manual chart-type previews were also simplified: the preview wireframes are inde
 
 
 Demo video of the project usage
-https://youtu.be/5mWlW3WWxOk 
+https://youtu.be/yVH9bTe2cE0

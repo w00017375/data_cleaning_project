@@ -82,6 +82,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+st.caption("Build version: 2026-06-07-final-check")
 
 st.markdown(
     """
