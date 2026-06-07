@@ -77,12 +77,11 @@ except Exception:
 # Page setup & styling
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Data Analysis Studio",
+    page_title="Data Analysis Studio aaaaa",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
 )
-st.caption("Build version: 2026-06-07-final-check")
 
 st.markdown(
     """
