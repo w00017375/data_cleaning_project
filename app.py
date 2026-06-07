@@ -1958,13 +1958,17 @@ def build_matplotlib_figure(df: pd.DataFrame, cfg: dict):
             ys = [c for c in ys if c]
             if not ys:
                 return None, "Pick at least one Y column."
+            # Sort by X for the same reason as the Plotly branch — without this
+            # an unsorted date axis produces a tangled line.
+            plot_df = df.dropna(subset=[x]).sort_values(by=x, kind="mergesort")
             for col in ys:
                 if ct == "Line":
-                    ax.plot(df[x], df[col], label=col, alpha=cfg.get("opacity", 0.9))
+                    ax.plot(plot_df[x], plot_df[col], label=col,
+                            alpha=cfg.get("opacity", 0.9))
                 else:
-                    ax.fill_between(df[x], df[col], alpha=cfg.get("opacity", 0.4),
-                                    label=col)
-                    ax.plot(df[x], df[col], alpha=0.9)
+                    ax.fill_between(plot_df[x], plot_df[col],
+                                    alpha=cfg.get("opacity", 0.4), label=col)
+                    ax.plot(plot_df[x], plot_df[col], alpha=0.9)
             ax.set_xlabel(x)
             if len(ys) == 1:
                 ax.set_ylabel(ys[0])
@@ -2416,8 +2420,14 @@ def build_figure(df: pd.DataFrame, cfg: dict):
             ys = [c for c in (y if isinstance(y, list) else [y]) if c]
             if not ys:
                 return None, "Pick at least one Y column."
+            # Sort by X before plotting — Plotly connects points in row order,
+            # so an unsorted dataframe produces a "spaghetti" line that zig-zags
+            # back and forth across the X axis. Drop rows where X is missing
+            # so they don't create visual artefacts at the start/end. The
+            # original dataframe is not mutated (we work on a local copy).
+            plot_df = df.dropna(subset=[x]).sort_values(by=x, kind="mergesort")
             fn = px.line if ct == "Line" else px.area
-            fig = fn(df, x=x, y=ys, **common)
+            fig = fn(plot_df, x=x, y=ys, **common)
         elif ct == "Bar":
             extra = []
             if color_arg and color_arg != x:

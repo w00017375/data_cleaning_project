@@ -1,0 +1,106 @@
+{
+  "source_file": "retail_data.xlsx",
+  "exported_at": "2026-06-07T13:21:28Z",
+  "n_steps": 5,
+  "steps": [
+    {
+      "operation": "missing_values",
+      "parameters": {
+        "strategy": "Fill with median (numeric)",
+        "columns": [
+          "Total_Amount"
+        ]
+      },
+      "affected_columns": [
+        "Total_Amount"
+      ],
+      "timestamp": "2026-06-07T13:17:11Z",
+      "rows_before": 3074,
+      "rows_after": 3074,
+      "rows_changed": 0
+    },
+    {
+      "operation": "missing_values",
+      "parameters": {
+        "strategy": "Fill with most frequent value (categorical)",
+        "columns": [
+          "City"
+        ]
+      },
+      "affected_columns": [
+        "City"
+      ],
+      "timestamp": "2026-06-07T13:17:34Z",
+      "rows_before": 3074,
+      "rows_after": 3074,
+      "rows_changed": 0
+    },
+    {
+      "operation": "remove_duplicates",
+      "parameters": {
+        "scope": "subset",
+        "columns": [
+          "Phone",
+          "City",
+          "Year"
+        ],
+        "keep": "first",
+        "rows_removed": 1
+      },
+      "affected_columns": [
+        "Phone",
+        "City",
+        "Year"
+      ],
+      "timestamp": "2026-06-07T13:18:26Z",
+      "rows_before": 3074,
+      "rows_after": 3073,
+      "rows_changed": 1
+    },
+    {
+      "operation": "group_rare_categories",
+      "parameters": {
+        "column": "Product_Brand",
+        "threshold": "< 7 rows",
+        "other_label": "Other",
+        "values_merged": 1,
+        "rows_relabelled": 3
+      },
+      "affected_columns": [
+        "Product_Brand"
+      ],
+      "timestamp": "2026-06-07T13:19:26Z",
+      "rows_before": 3073,
+      "rows_after": 3073,
+      "rows_changed": 0
+    },
+    {
+      "operation": "scale",
+      "parameters": {
+        "column": "Ratings",
+        "method": "min_max",
+        "before": {
+          "min": 1.0,
+          "max": 5.0,
+          "mean": 2.7577,
+          "std": 1.3834,
+          "median": 3.0
+        },
+        "after": {
+          "min": 0.0,
+          "max": 1.0,
+          "mean": 0.4394,
+          "std": 0.3459,
+          "median": 0.5
+        }
+      },
+      "affected_columns": [
+        "Ratings"
+      ],
+      "timestamp": "2026-06-07T13:19:49Z",
+      "rows_before": 3073,
+      "rows_after": 3073,
+      "rows_changed": 0
+    }
+  ]
+}
