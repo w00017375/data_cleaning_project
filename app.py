@@ -1,14 +1,3 @@
-"""
-Data Analysis Studio - A Streamlit application for data exploration,
-cleaning, visualization, and reporting.
-
-Tabs:
-    1. Upload & Overview  - load files (CSV/Excel/JSON/Google Sheets) and view summary
-    2. Cleaning & Prep    - filter, transform, log every step into a reusable recipe
-    3. Visualization      - build charts from the cleaned dataframe
-    4. Report & Export    - export cleaned data, recipe and a summary report
-"""
-
 from __future__ import annotations
 
 import io
@@ -77,7 +66,7 @@ except Exception:
 # Page setup & styling
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Data Analysis Studio aaaaa",
+    page_title="Data Analysis Studio",
     page_icon="📊",
     layout="wide",
     initial_sidebar_state="expanded",
